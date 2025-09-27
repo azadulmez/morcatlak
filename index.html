@@ -3,13 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>a.pdf – Flipbook Viewer</title>
+  <title>a.pdf – Dergi Görüntüleyici (Flipbook)</title>
 
-  <!-- flipbook-viewer (jsDelivr CDN, UMD derleme) -->
-  <script src="https://cdn.jsdelivr.net/npm/flipbook-viewer/dist/flipbook.min.js"></script>
-
-  <!-- PDF.js (core + worker) -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  <!-- jQuery (turn.js için) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js" crossorigin="anonymous"></script>
+  <!-- turn.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/turn.js/4.1.0/turn.min.js" crossorigin="anonymous"></script>
+  <!-- PDF.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js" crossorigin="anonymous"></script>
   <script>
     pdfjsLib.GlobalWorkerOptions.workerSrc =
       "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js";
@@ -39,13 +40,13 @@
 
     main{ display:grid; place-items:center; padding:1rem; flex:1; min-height:0; }
     #stage{ width:min(96vw, 1200px); }
-    #viewerWrap{
-      position:relative; border-radius:12px; overflow:hidden; background:#fff;
-      box-shadow:0 16px 40px rgba(0,0,0,.12), 0 3px 14px rgba(0,0,0,.06);
-    }
-    #flipTarget{ width:1000px; height:650px; margin:0 auto; } /* JS ile değişecek */
+    #wrap{ position:relative; border-radius:12px; overflow:hidden; background:#fff;
+           box-shadow:0 16px 40px rgba(0,0,0,.12), 0 3px 14px rgba(0,0,0,.06); }
+    #flipbook{ /* JS boyutlandırır */ }
 
-    /* Yükleniyor / Hata */
+    .page{ background:#fff; }
+    .page canvas{ display:block; width:100%; height:100%; }
+
     #overlay{
       position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
       background:linear-gradient(180deg, rgba(255,255,255,.9), rgba(255,255,255,.7));
@@ -56,18 +57,17 @@
       border:3px solid #e2e8f0;border-top-color:var(--acc); margin-right:10px;
       animation:spin 1s linear infinite; }
     @keyframes spin{ to{ transform:rotate(360deg); } }
-    #errmsg{ display:none; color:#b91c1c; background:#fee2e2; border:1px solid #fecaca; padding:.6rem .9rem; border-radius:10px; margin-top:.6rem; }
+    #errmsg{ display:none; color:#b91c1c; background:#fee2e2; border:1px solid #fecaca; padding:.6rem .9rem; border-radius:10px; margin-top:.6rem; white-space:pre-line; }
 
-    @media (max-width: 760px){
-      header{ padding:.5rem .75rem; }
-    }
+    .cover-left{ background:linear-gradient(135deg,#111,#444); }
+    .cover-right{ background:linear-gradient(225deg,#111,#444); }
   </style>
 </head>
 <body>
   <header>
     <div class="controls">
       <span class="pill">Dergi</span>
-      <span id="pageInfo" class="pill" title="Sayfa / Toplam">— / —</span>
+      <span id="pageInfo" class="pill">— / —</span>
     </div>
     <div class="controls">
       <button id="prev" title="Önceki (← / PageUp)">⟵</button>
@@ -86,165 +86,158 @@
 
   <main>
     <div id="stage">
-      <div id="viewerWrap">
+      <div id="wrap">
         <div id="overlay"><div class="spinner"></div>Yükleniyor…</div>
-        <div id="flipTarget"></div>
+        <div id="flipbook"></div>
       </div>
       <div id="errmsg"></div>
     </div>
   </main>
 
   <script>
-    // ---- KULLANICI AYARI ----
-    const PDF_URL = "a.pdf";     // a.pdf, index.html ile aynı klasörde olmalı
+    // ========= KULLANICI AYARI =========
+    const PDF_URL = "a.pdf"; // index.html ile AYNI klasörde
+
+    // ========= DURUM =========
+    const $flip = $("#flipbook");
+    const $pageInfo = $("#pageInfo");
+    const $overlay = $("#overlay");
+    const $errmsg = $("#errmsg");
+    const $viewMode = $("#viewMode");
+
+    let pdfDoc = null, totalPages = 0;
+    let viewMode = "double";
+    let zoom = 1;
     const BASE = { w: 1000, h: 650 };
     const ZOOM = { min: 0.5, max: 2.5 };
 
-    // ---- DURUM ----
-    let viewer = null;           // flipbook-viewer instance
-    let pdfDoc = null;           // pdf.js document
-    let totalPages = 0;
-    let zoom = 1;
-    let viewMode = "double";     // 'single' | 'double'
+    function showError(msg){ $errmsg.text(msg).show(); }
+    function hideError(){ $errmsg.hide().text(""); }
 
-    const $target   = document.getElementById("flipTarget");
-    const $overlay  = document.getElementById("overlay");
-    const $errmsg   = document.getElementById("errmsg");
-    const $pageInfo = document.getElementById("pageInfo");
-    const $viewMode = document.getElementById("viewMode");
-
-    // ---- Yardımcılar ----
-    const debounce = (fn,ms)=>{ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a),ms); }; };
-    const computeSize = ()=>{
+    function computeSize(){
       const maxW = Math.min(window.innerWidth * 0.96, 1200);
       const ratio = BASE.h / BASE.w;
-      const targetW = viewMode === "single" ? Math.min(maxW, 740) : maxW;
-      const targetH = Math.round(targetW * ratio);
-      return { w: targetW, h: targetH };
-    };
+      const w = (viewMode === "single") ? Math.min(maxW, 740) : maxW;
+      return { w, h: Math.round(w * ratio) };
+    }
     function applySize(){
       const {w,h} = computeSize();
-      $target.style.width  = w+"px";
-      $target.style.height = h+"px";
-      if (viewer) viewer.resize(w, h);  // flipbook-viewer’ın resize’ı
+      $flip.css({ width: w+"px", height: h+"px" });
+      if($flip.data("turn")) $flip.turn("size", w, h);
     }
-    const onResize = debounce(()=>{ applySize(); renderAround(currentPage()); }, 120);
-    window.addEventListener("resize", onResize);
+    const debounce = (fn,ms)=>{ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a),ms); }; };
+    window.addEventListener("resize", debounce(()=>{ applySize(); renderAround(currentPage()); },120));
 
-    function showError(msg){ $errmsg.textContent = msg; $errmsg.style.display = "block"; }
-    function hideError(){ $errmsg.style.display = "none"; $errmsg.textContent = ""; }
+    const currentPage = ()=> $flip.data("turn")?.page() || 1;
+    function updatePageInfo(){ $pageInfo.text(`${currentPage()} / ${totalPages}`); }
 
-    // ---- PDF Provider (flipbook-viewer book interface) ----
-    // numPages(): number, getPage(num, cb): cb(CanvasImageSource)
-    function makePdfBook(pdf){
-      return {
-        numPages: () => pdf.numPages,
-        getPage: async (num, cb) => {
-          const page = await pdf.getPage(num);
-          const { w:flipW, h:flipH } = computeSize();
-          const pageW = (viewMode === "single") ? flipW : flipW/2;
-          const pageH = flipH;
-
-          const viewport1 = page.getViewport({ scale: 1 });
-          const scale = Math.min(pageW/viewport1.width, pageH/viewport1.height) * zoom;
-          const viewport = page.getViewport({ scale });
-
-          const ratio = window.devicePixelRatio || 1;
-          const canvas = document.createElement("canvas");
-          const ctx = canvas.getContext("2d");
-
-          canvas.width  = Math.floor(viewport.width  * ratio);
-          canvas.height = Math.floor(viewport.height * ratio);
-          canvas.style.width  = Math.floor(viewport.width)  + "px";
-          canvas.style.height = Math.floor(viewport.height) + "px";
-          ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-
-          await page.render({ canvasContext: ctx, viewport }).promise;
-          cb(canvas); // flipbook-viewer CanvasImageSource kabul ediyor
-        }
-      };
+    async function loadPDF(){
+      try{
+        pdfDoc = await pdfjsLib.getDocument(PDF_URL).promise;
+        totalPages = pdfDoc.numPages;
+      }catch(err){
+        console.error("pdf.js getDocument hatası:", err);
+        showError(
+          "PDF yüklenemedi:\n" +
+          "- 'a.pdf' index.html ile aynı klasörde mi?\n" +
+          "- Dosya adı tam olarak 'a.pdf' mi (büyük/küçük harf)?\n" +
+          "- Aşağıdaki link tarayıcıda açılıyor mu?\n" +
+          (location.origin + location.pathname.replace(/[^/]*$/, "") + "a.pdf")
+        );
+        throw err;
+      }
     }
 
-    // ---- Flipbook kur ----
-    function buildFlip(book){
-      const opts = {
-        width:  computeSize().w,
-        height: computeSize().h,
-        backgroundColor: "#ffffff",
-        boxColor: "#ffffff",
-        singlepage: (viewMode === "single") // tek sayfa modu
-      };
-      window.flipbook.init(book, "flipTarget", opts, (err, vwr) => {
-        if (err) { showError("Flipbook başlatılamadı: " + err.message); return; }
-        viewer = vwr;
-        updatePageInfo();
-        // seen event → sayfa göstergesi
-        viewer.on("seen", (n)=> { updatePageInfo(n); });
-        bindControls();
-        renderAround(currentPage());
-      });
-    }
-
-    function currentPage(){ return viewer ? viewer.page_number || 1 : 1; }
-    function updatePageInfo(n){
-      const p = n || currentPage();
-      $pageInfo.textContent = `${p} / ${totalPages}`;
-    }
-
-    // Yakın sayfaları iste (performans)
-    function renderAround(p){
-      if (!viewer) return;
-      // flipbook-viewer ihtiyaç duydukça getPage çağırır; burada sadece yeniden boyut için redraw tetikliyoruz
-      viewer.redraw && viewer.redraw(); // varsa (yeni sürümlerde mevcut)
-    }
-
-    // ---- Kontroller + Klavye ----
-    function bindControls(){
-      document.getElementById("prev").onclick = ()=> viewer && viewer.flip_back();
-      document.getElementById("next").onclick = ()=> viewer && viewer.flip_forward();
-      document.getElementById("zoomIn").onclick  = ()=>{ zoom = Math.min(ZOOM.max, zoom+0.1); applySize(); renderAround(currentPage()); };
-      document.getElementById("zoomOut").onclick = ()=>{ zoom = Math.max(ZOOM.min, zoom-0.1); applySize(); renderAround(currentPage()); };
-      document.getElementById("fit").onclick     = ()=>{ zoom = 1; applySize(); renderAround(currentPage()); };
-      $viewMode.onchange = (e)=>{ viewMode = e.target.value; applySize(); // yeniden kur
-        // viewer tek/çift bilgisini seçenek olarak alıyor; tekrar init edelim:
-        const book = makePdfBook(pdfDoc);
-        buildFlip(book);
-      };
-
-      // Klavye
-      document.addEventListener("keydown", (ev)=>{
-        const tag = (ev.target.tagName||"").toLowerCase();
-        if(tag === "input" || tag === "textarea") return;
-        if(ev.key === "ArrowLeft" || ev.key === "PageUp"){ ev.preventDefault(); viewer && viewer.flip_back(); }
-        else if(ev.key === "ArrowRight" || ev.key === " " || ev.key === "PageDown"){ ev.preventDefault(); viewer && viewer.flip_forward(); }
-        else if(ev.key === "+" || ev.key === "="){ ev.preventDefault(); document.getElementById("zoomIn").click(); }
-        else if(ev.key === "-" || ev.key === "_"){ ev.preventDefault(); document.getElementById("zoomOut").click(); }
-        else if(ev.key.toLowerCase() === "f"){ ev.preventDefault(); document.getElementById("fit").click(); }
-        else if(ev.key.toLowerCase() === "s"){ ev.preventDefault();
-          viewMode = (viewMode==="single") ? "double" : "single";
-          $viewMode.value = viewMode; $viewMode.onchange({target:$viewMode});
+    function buildShell(){
+      $flip.empty();
+      for(let i=1;i<=totalPages;i++){
+        const $p = $(`<div class="page" data-page="${i}"></div>`);
+        if(i === 1) $p.addClass("cover-left");
+        if(i === totalPages) $p.addClass("cover-right");
+        $p.append("<canvas></canvas>");
+        $flip.append($p);
+      }
+      const {w,h} = computeSize();
+      if($flip.data("turn")) $flip.turn("destroy");
+      $flip.turn({
+        width: w, height: h, autoCenter: true, gradients: true, elevation: 50,
+        pages: totalPages, display: (viewMode === "single" ? "single" : "double"),
+        when: {
+          turned: function(e, page){ updatePageInfo(); renderAround(page); }
         }
       });
+      updatePageInfo();
     }
 
-    // ---- Başlat ----
+    async function renderPage(p){
+      if(p<1 || p>totalPages) return;
+      const pageDiv = $flip.find(`.page[data-page="${p}"]`)[0];
+      if(!pageDiv) return;
+      const canvas = pageDiv.querySelector("canvas");
+      const ctx = canvas.getContext("2d");
+      const {w:flipW, h:flipH} = computeSize();
+      const pageW = (viewMode === "single") ? flipW : flipW/2;
+      const pageH = flipH;
+
+      try{
+        const page = await pdfDoc.getPage(p);
+        const vp1 = page.getViewport({ scale: 1 });
+        const scale = Math.min(pageW/vp1.width, pageH/vp1.height) * zoom;
+        const vp = page.getViewport({ scale });
+        const ratio = window.devicePixelRatio || 1;
+        canvas.width = Math.floor(vp.width * ratio);
+        canvas.height = Math.floor(vp.height * ratio);
+        canvas.style.width = Math.floor(vp.width) + "px";
+        canvas.style.height = Math.floor(vp.height) + "px";
+        ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      }catch(err){
+        console.error("Sayfa render hatası:", err);
+        showError("Belirli bir sayfa render edilemedi. PDF bozuk olabilir veya çok büyük.");
+      }
+    }
+
+    async function renderAround(p){
+      await renderPage(p);
+      await renderPage(p-1);
+      await renderPage(p+1);
+      if(viewMode === "double"){
+        if(p%2===0){ await renderPage(p+1); } else { await renderPage(p-1); }
+      }
+    }
+
+    // Butonlar
+    $("#prev").on("click", ()=> $flip.turn("previous"));
+    $("#next").on("click", ()=> $flip.turn("next"));
+    $("#zoomIn").on("click", ()=>{ zoom = Math.min(ZOOM.max, zoom+0.1); applySize(); renderAround(currentPage()); });
+    $("#zoomOut").on("click", ()=>{ zoom = Math.max(ZOOM.min, zoom-0.1); applySize(); renderAround(currentPage()); });
+    $("#fit").on("click", ()=>{ zoom = 1; applySize(); renderAround(currentPage()); });
+    $("#viewMode").on("change", (e)=>{ viewMode = e.target.value; applySize(); buildShell(); renderAround(currentPage()); });
+
+    // Klavye
+    document.addEventListener("keydown", (ev)=>{
+      const tag = (ev.target.tagName||"").toLowerCase();
+      if(tag === "input" || tag === "textarea") return;
+      if(ev.key === "ArrowLeft" || ev.key === "PageUp"){ ev.preventDefault(); $flip.turn("previous"); }
+      else if(ev.key === "ArrowRight" || ev.key === " " || ev.key === "PageDown"){ ev.preventDefault(); $flip.turn("next"); }
+      else if(ev.key === "+" || ev.key === "="){ ev.preventDefault(); $("#zoomIn").click(); }
+      else if(ev.key === "-" || ev.key === "_"){ ev.preventDefault(); $("#zoomOut").click(); }
+      else if(ev.key.toLowerCase() === "f"){ ev.preventDefault(); $("#fit").click(); }
+      else if(ev.key.toLowerCase() === "s"){ ev.preventDefault(); viewMode = (viewMode==="single")?"double":"single"; $viewMode.val(viewMode).trigger("change"); }
+    });
+
+    // Başlat
     (async function start(){
       try{
         hideError();
-        // PDF var mı (404 testi)
-        const head = await fetch(PDF_URL, { method:"HEAD", cache:"no-store" });
-        if(!head.ok) throw new Error(`PDF bulunamadı (HTTP ${head.status}). 'a.pdf' adı/konumu doğru mu?`);
-        pdfDoc = await pdfjsLib.getDocument(PDF_URL).promise;
-        totalPages = pdfDoc.numPages;
-
+        await loadPDF();
         applySize();
-        buildFlip( makePdfBook(pdfDoc) );
+        buildShell();
+        await renderAround(1);
       }catch(err){
-        console.error(err);
-        showError("PDF yüklenemedi: " + err.message +
-                  "\n• 'a.pdf' index.html ile aynı klasörde mi?\n• Dosya adı tam olarak 'a.pdf' mi?");
+        // loadPDF içinde mesaj verdik
       }finally{
-        $overlay.style.display = "none";
+        $overlay.hide();
       }
     })();
   </script>
