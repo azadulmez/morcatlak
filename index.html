@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>a.pdf – Dergi (Flipbook) Görünümü</title>
+
+  <!-- jQuery (turn.js için gerekli) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+  <!-- turn.js (flipbook efekti) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/turn.js/4.1.0/turn.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+  <!-- PDF.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script>
+    // PDF.js worker yolunu açıkça veriyoruz (CDN sürümü):
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+  </script>
+
+  <style>
+    :root{ --bg:#f4f4f6; --ink:#0f172a; --acc:#8b5cf6; }
+    *{ box-sizing:border-box; }
+    body{
+      margin:0; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      background:var(--bg); color:var(--ink);
+      display:flex; flex-direction:column; min-height:100svh;
+    }
+    header{
+      display:flex; align-items:center; justify-content:space-between;
+      gap:.75rem; padding:.75rem 1rem; background:white; box-shadow:0 2px 10px rgba(0,0,0,.06);
+      position:sticky; top:0; z-index:10;
+    }
+    header .title{ font-weight:700; letter-spacing:.2px; }
+    header .controls{ display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; }
+    button, select{
+      appearance:none; border:1px solid #e2e8f0; background:white; color:var(--ink);
+      padding:.5rem .75rem; border-radius:999px; cursor:pointer; font-weight:600;
+      transition:.2s ease; box-shadow:0 1px 2px rgba(0,0,0,.04);
+    }
+    button:hover{ transform:translateY(-1px); box-shadow:0 4px 12px rgba(0,0,0,.08); }
+    .primary{ border-color:transparent; background:var(--acc); color:white; }
+
+    main{ display:grid; place-items:center; padding:1rem; flex:1; }
+    #stage{ width:min(96vw, 1100px); }
+
+    /* Flipbook alanı */
+    #flipbook{
+      margin:auto; background:transparent;
+      box-shadow:0 12px 36px rgba(0,0,0,.12), 0 2px 12px rgba(0,0,0,.06);
+      border-radius:12px; overflow:hidden;
+    }
+    .page{ background:#fff; }
+    .page canvas{ display:block; width:100%; height:100%; }
+
+    .hint{ text-align:center; opacity:.7; font-size:.9rem; margin-top:.6rem; }
+
+    .page.cover-left{ background:linear-gradient(135deg,#111,#333); }
+    .page.cover-right{ background:linear-gradient(225deg,#111,#333); }
+
+    @media (max-width: 720px){
+      header{ padding:.5rem .75rem; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="title">a.pdf – Dergi Görünümü</div>
+    <div class="controls">
+      <button id="prev">⟵ Önceki</button>
+      <button id="next">Sonraki ⟶</button>
+      <button id="zoomOut">−</button>
+      <button id="zoomIn">＋</button>
+      <button id="fit" class="primary">Ekrana Sığdır</button>
+      <select id="viewMode">
+        <option value="double" selected>Çift Sayfa</option>
+        <option value="single">Tek Sayfa</option>
+      </select>
+    </div>
+  </header>
+
+  <main>
+    <div id="stage">
+      <div id="flipbook"></div>
+      <div class="hint">Sayfayı çevirmek için köşeden sürükleyin ya da butonları kullanın.</div>
+    </div>
+  </main>
+
+  <script>
+    // ---- PDF yolu: a.pdf aynı klasörde olmalı ----
+    const PDF_URL = 'a.pdf';
+
+    // Boyutlandırma
+    const flipbook = document.getElementById('flipbook');
+    let baseWidth = 960, baseHeight = 600, zoom = 1, viewMode = 'double';
+
+    function sizeToFit(){
+      const maxW = Math.min(window.innerWidth * 0.96, 1100);
+      const ratio = baseHeight / baseWidth;
+      let targetW = viewMode === 'single' ? Math.min(maxW, 680) : maxW;
+      const targetH = targetW * ratio;
+      $('#flipbook').css({ width: targetW + 'px', height: targetH + 'px' });
+      if($('#flipbook').data('turn')){
+        $('#flipbook').turn('size', targetW, targetH);
+      }
+    }
+    window.addEventListener('resize', sizeToFit);
+
+    // Kontroller
+    document.getElementById('prev').addEventListener('click', () => $('#flipbook').turn('previous'));
+    document.getElementById('next').addEventListener('click', () => $('#flipbook').turn('next'));
+    document.getElementById('zoomIn').addEventListener('click', () => { zoom = Math.min(2.5, zoom + 0.1); rerenderAll(); });
+    document.getElementById('zoomOut').addEventListener('click', () => { zoom = Math.max(0.5, zoom - 0.1); rerenderAll(); });
+    document.getElementById('fit').addEventListener('click', () => { zoom = 1; rerenderAll(); });
+    document.getElementById('viewMode').addEventListener('change', (e)=>{ viewMode = e.target.value; rebuildFlipbook(); });
+
+    // PDF yükle & render
+    let pdfDoc = null;
+    let pageCanvases = []; // {pageNum, canvas, ctx}
+
+    async function loadPDF(){
+      pdfDoc = await pdfjsLib.getDocument(PDF_URL).promise;
+      const total = pdfDoc.numPages;
+
+      pageCanvases.length = 0;
+      $('#flipbook').empty();
+
+      for(let i=1;i<=total;i++){
+        const $page = $('<div class="page"></div>');
+        if(i === 1) $page.addClass('cover-left');
+        if(i === total) $page.addClass('cover-right');
+        const canvas = document.createElement('canvas');
+        $page.append(canvas);
+        $('#flipbook').append($page);
+        pageCanvases.push({ pageNum:i, canvas, ctx: canvas.getContext('2d') });
+      }
+
+      initTurn();
+      sizeToFit();
+      await rerenderAll();
+    }
+
+    function initTurn(){
+      const width = parseInt(getComputedStyle(flipbook).width);
+      const height = parseInt(getComputedStyle(flipbook).height);
+      if($('#flipbook').data('turn')) $('#flipbook').turn('destroy');
+      $('#flipbook').turn({
+        width, height,
+        autoCenter:true,
+        gradients:true,
+        elevation:50,
+        pages: pageCanvases.length,
+        display: viewMode === 'single' ? 'single' : 'double'
+      });
+    }
+
+    async function rerenderAll(){
+      const width = parseInt(getComputedStyle(flipbook).width);
+      const height = parseInt(getComputedStyle(flipbook).height);
+
+      const pageW = (viewMode === 'single') ? width : width/2;
+      const pageH = height;
+
+      for(const item of pageCanvases){
+        const page = await pdfDoc.getPage(item.pageNum);
+        const viewport = page.getViewport({ scale: 1 });
+        const scale = Math.min( (pageW / viewport.width), (pageH / viewport.height) ) * zoom;
+        const v = page.getViewport({ scale });
+        const canvas = item.canvas;
+        const ctx = item.ctx;
+        const ratio = window.devicePixelRatio || 1;
+
+        canvas.width = Math.floor(v.width * ratio);
+        canvas.height = Math.floor(v.height * ratio);
+        canvas.style.width = Math.floor(v.width) + 'px';
+        canvas.style.height = Math.floor(v.height) + 'px';
+        ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+
+        await page.render({ canvasContext: ctx, viewport: v }).promise;
+      }
+
+      if($('#flipbook').data('turn')){
+        $('#flipbook').turn('size', width, height);
+        $('#flipbook').turn('display', viewMode === 'single' ? 'single' : 'double');
+      }
+    }
+
+    function rebuildFlipbook(){
+      sizeToFit();
+      initTurn();
+      rerenderAll();
+    }
+
+    // Başlat
+    loadPDF().catch(err=>{
+      console.error(err);
+      alert('PDF yüklenirken sorun oluştu. a.pdf dosyası index.html ile aynı klasörde mi?');
+    });
+  </script>
+</body>
+</html>
